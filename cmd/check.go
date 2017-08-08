@@ -21,16 +21,19 @@
 package cmd
 
 import (
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
-
+	// "github.com/kr/http/limit"
 	"github.com/briandowns/spinner"
+	"github.com/kr/http/limit"
 	"github.com/spf13/cobra"
 )
 
@@ -51,7 +54,7 @@ var checkCmd = &cobra.Command{
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		rss, err := getFeedInfo(getFeedUrl(storeDomain, 0, Limit, NoVariants))
+		rss, err := getFeedInfo(getFeedUrl(storeDomain, 0, Limit, NoVariants), context.Background())
 		if err != nil {
 			log.Fatal(err)
 		} else {
@@ -63,13 +66,13 @@ var checkCmd = &cobra.Command{
 					autoRss := recursiveParallelDownload(storeDomain, Limit)
 					printFeedUrls(storeDomain, autoRss.PageCount, autoRss.ProductsPerPage)
 				} else {
-
-					fmt.Printf("Fetching %d pages with %d products per page\n", rss.PageCount, rss.ProductsPerPage)
-					derr := parallelDownload(storeDomain, rss.PageCount, rss.ProductsPerPage, NoVariants)
+					derr := parallelDownload(storeDomain, rss.PageCount, rss.ProductsPerPage, NoVariants, context.Background())
 					if derr == nil {
 						printFeedUrls(storeDomain, rss.PageCount, rss.ProductsPerPage)
 					} else {
-						fmt.Println("\nSome feed pages did not work. Lower the limit (hint: use the --limit flag) and try again!")
+						fmt.Println(RedText("\nSome feed pages did not work."))
+						fmt.Println(derr)
+						fmt.Println(YellowText("Lower the limit (hint: use the --limit flag) and try again!"))
 					}
 
 				}
@@ -81,6 +84,7 @@ var checkCmd = &cobra.Command{
 }
 
 var Limit int
+var MaxConcurrentRequests int
 var NoVariants bool
 var AutoLimit bool
 
@@ -93,16 +97,16 @@ func printFeedUrls(storeDomain string, pageCount int, limit int) {
 }
 
 func recursiveParallelDownload(storeDomain string, startLimit int) Rss {
-	s := spinner.New(spinner.CharSets[11], 100*time.Millisecond) // Build our new spinner
-	s.Prefix = fmt.Sprintf("Testing limit %d ", startLimit)
-	s.Start()
-
-	rss, err := getFeedInfo(getFeedUrl(storeDomain, 0, startLimit, NoVariants))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // make sure all paths cancel the context to avoid context leak
+	fmt.Printf("Testing limit %d \n", startLimit)
+	url := getFeedUrl(storeDomain, 0, startLimit, NoVariants)
+	rss, err := getFeedInfo(url, ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
-	derr := parallelDownload(storeDomain, rss.PageCount, startLimit, NoVariants)
-	s.Stop()
+	derr := parallelDownload(storeDomain, rss.PageCount, startLimit, NoVariants, ctx)
+	cancel()
 	if derr == nil {
 		return rss
 	}
@@ -115,12 +119,24 @@ func recursiveParallelDownload(storeDomain string, startLimit int) Rss {
 }
 
 func init() {
+
 	checkCmd.PersistentFlags().IntVarP(&Limit, "limit", "l", 500, "limit the number of products per feed page")
-	checkCmd.PersistentFlags().BoolVarP(&AutoLimit, "auto-limit", "a", false, "find a working limit paramater ")
+	checkCmd.PersistentFlags().IntVarP(&MaxConcurrentRequests, "max-concurrent-requests", "c", 10, "limit the number concurrent requests to Shopify's servers")
+	checkCmd.PersistentFlags().BoolVarP(&AutoLimit, "auto-limit", "a", false, "find a working limit parameter ")
 	checkCmd.PersistentFlags().BoolVarP(&NoVariants, "no-variants", "n", false, "omit all but the first available variant per product")
 
 	RootCmd.AddCommand(checkCmd)
 	// Here you will define your flags and configuration settings.
+
+	// Limit to 10 ooncurrent connections per host
+	url := func(r *http.Request) interface{} {
+		return r.URL.Host
+	}
+	http.DefaultTransport = &limit.Transport{
+		Locker:    limit.By(url, MaxConcurrentRequests),
+		Transport: http.DefaultTransport,
+	}
+
 }
 
 func getFeedUrl(storeDomain string, page int, limit int, noVariants bool) *url.URL {
@@ -153,11 +169,11 @@ func getFeedUrl(storeDomain string, page int, limit int, noVariants bool) *url.U
 	return u
 }
 
-func getFeedInfo(feedUrl *url.URL) (Rss, error) {
+func getFeedInfo(feedUrl *url.URL, ctx context.Context) (Rss, error) {
 	q := feedUrl.Query()
 	q.Set("info", "")
 	feedUrl.RawQuery = q.Encode()
-	xmlData, err := getContent(feedUrl.String())
+	xmlData, err := getContent(feedUrl.String(), ctx)
 	var rss Rss
 	if err == nil {
 		xml.Unmarshal(xmlData, &rss)
@@ -165,7 +181,10 @@ func getFeedInfo(feedUrl *url.URL) (Rss, error) {
 	return rss, err
 }
 
-func parallelDownload(storeDomain string, pageCount int, limit int, noVariants bool) error {
+func parallelDownload(storeDomain string, pageCount int, limit int, noVariants bool, ctx context.Context) error {
+	s := spinner.New(spinner.CharSets[11], 100*time.Millisecond) // Build our new spinner
+	s.Prefix = fmt.Sprintf("Fetching %d products per page (0 of %d pages succeeded) ", limit, pageCount)
+	s.Start()
 	quit := make(chan bool)
 	errc := make(chan error)
 	done := make(chan error)
@@ -174,7 +193,7 @@ func parallelDownload(storeDomain string, pageCount int, limit int, noVariants b
 			// fetch
 			feedUrl := getFeedUrl(storeDomain, i, limit, noVariants)
 			//fmt.Println(feedUrl.String())
-			_, err := getContent(feedUrl.String())
+			_, err := getContent(feedUrl.String(), ctx)
 			ch := done // we'll send to done if nil error and to errc otherwise
 			if err != nil {
 				ch = errc
@@ -193,10 +212,13 @@ func parallelDownload(storeDomain string, pageCount int, limit int, noVariants b
 		select {
 		case err := <-errc:
 			close(quit)
+			s.Stop()
 			return err
 		case <-done:
 			count++
+			s.Prefix = fmt.Sprintf("Fetching %d products per page (%d of %d pages succeeded) ", limit, count, pageCount)
 			if count == pageCount {
+				s.Stop()
 				return nil // got all N signals, so there was no error
 			}
 		}

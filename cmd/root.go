@@ -21,6 +21,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -29,7 +30,6 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	. "github.com/tj/go-debug"
 )
 
@@ -60,20 +60,20 @@ func init() {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	if cfgFile != "" {
-		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
-	} else {
-		viper.AddConfigPath(".")
-		viper.SetConfigName("config")
-	}
+	// if cfgFile != "" {
+	// 	// Use config file from the flag.
+	// 	viper.SetConfigFile(cfgFile)
+	// } else {
+	// 	viper.AddConfigPath(".")
+	// 	viper.SetConfigName("config")
+	// }
 
-	viper.AutomaticEnv() // read in environment variables that match
+	// viper.AutomaticEnv() // read in environment variables that match
 
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Println("Using config file:", viper.ConfigFileUsed())
-	}
+	// // If a config file is found, read it in.
+	// if err := viper.ReadInConfig(); err == nil {
+	// 	fmt.Println("Using config file:", viper.ConfigFileUsed())
+	// }
 }
 
 /* colors */
@@ -98,24 +98,26 @@ var GreenText = color.New(color.FgGreen).SprintFunc()
 // cyan when printed out.
 var CyanText = color.New(color.FgCyan).SprintFunc()
 
-func getContent(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+func getContent(url string, ctx context.Context) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	req = req.WithContext(ctx)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET error: %v", err)
+		return nil, fmt.Errorf("GET error: %v at %s", err, RedText(url))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Status error: %v", resp.StatusCode)
+		return nil, fmt.Errorf("Status error: %v at %s", resp.StatusCode, RedText(url))
 	}
 
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("Read body: %v", err)
+		return nil, fmt.Errorf("Read body: %v at %s", err, RedText(url))
 	}
 	responseString := string(data)
 	if responseString == "Liquid error: Memory limits exceeded" {
-		return nil, fmt.Errorf("Memory error at %s", url)
+		return nil, fmt.Errorf("Memory error at %s", RedText(url))
 	}
 
 	return data, nil
