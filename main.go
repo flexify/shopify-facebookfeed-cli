@@ -20,7 +20,7 @@
 
 package main
 
-import "github.com/dommmel/shopify-facebookfeed/cmd"
+import "github.com/dommmel/shopify-facebookfeed-cli/cmd"
 
 func main() {
 	cmd.Execute()
